@@ -37,7 +37,7 @@ classDiagram
     class Scheduler {
         +generate_plan(owner, current_time) dict
         +sort_by_time(tasks) List~Task~
-        +find_conflicts(tasks) List~Task~
+        +find_conflicts(tasks) List~Tuple~Task, Task~~
         -_overlaps(first, second) bool
         -_sort_by_priority(tasks) List~Task~
         -_fits(task, remaining_minutes) bool

@@ -24,13 +24,14 @@
 **a. Initial design**
 
 - Briefly describe your initial UML design.
-    My final UML design is built around exactly four core classes: `Task`, `Pet`, `Owner`, and `Scheduler`. `Owner` owns a list of `Pet`s through composition, and `Pet` owns a list of `Task`s the same way. `Scheduler` is connected to `Owner` and `Task` through dependency arrows rather than ownership, since it reads and processes their data — pulling due tasks and sorting them — without holding that data itself.
+    My initial design (shown in the Classes section above) had the same four class names — Pet, Task, Owner, Scheduler — but different fields than what I ended up with. Task originally had a `category`, a `priority` enum, and a `preferred_time_window`; Owner had a `preferences` object instead of a plain time budget; and Scheduler was meant to call `_explain_decision()` per task rather than building a list of explanation strings. None of that survived into the final version — I dropped priority and category in favor of judging urgency by how overdue a task was, and simplified Scheduler's output into the dictionary shape it has now.
+
 
 - What classes did you include, and what responsibilities did you assign to each?
-    - Owner — holds an owner's id, name, list of Pets, and available time budget for the day; responsible for adding pets and collecting all tasks across every pet it manages.
-    - Pet — holds a pet's basic profile info (species, name, id) and its list of Tasks; responsible for adding and retrieving tasks.
-    - Task — represents a single recurring care item (walk, feeding, med, groom, enrichment); responsible for knowing its own schedule/frequency and completion status, and determining whether it's currently due.
-    - Scheduler — the "brain" of the system; retrieves due tasks from an Owner's pets, sorts them by urgency, and decides what fits within the available time, returning a plan.
+    - Pet — held a pet's profile (species, breed, age, weight, dietary/medical notes) plus its tasks; could add/get tasks and update its own profile.
+    - Task — represented a care item with a category, priority, frequency, and a preferred time window; could report whether it was due, mark itself complete, and score its own priority.
+    - Owner — held pets and a preferences object (wake time, sleep time, available minutes); could add pets, update preferences, and pull today's tasks.
+    - Scheduler — took a time budget and a task list, sorted by priority, and explained each individual scheduling decision.
 
 **b. Design changes**
 
