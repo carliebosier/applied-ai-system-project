@@ -43,9 +43,9 @@ class Task:
         if frequency == "weekly":
             return elapsed >= timedelta(days=7)
 
-        # Frequency parsing is simplified for now: anything that isn't "daily" or
-        # "weekly" (e.g. "every 6 hours", "mon/wed/fri") is treated as always due.
-        return True
+        # Any other frequency (e.g. "as needed") has no recurrence rule, so a
+        # completed task is done for good, matching next_occurrence() returning None.
+        return False
 
     def mark_complete(self) -> None:
         """Record that this task was finished, leaving its scheduled `time` untouched."""

@@ -399,3 +399,61 @@ def test_sorting_and_conflict_detection_handle_an_empty_task_list():
 
 # Protects against a new owner's first visit crashing the Streamlit UI: app.py indexes
 # straight into the plan's four keys, so they all have to exist even with no tasks.
+
+
+def test_completed_as_needed_task_is_not_due_again():
+    """A finished one-off task stays done, even a week after it was completed."""
+    task = Task(
+        task_id="t1",
+        description="Vet visit",
+        time=datetime(2026, 9, 22, 8, 0),
+        frequency="as needed",
+        is_completed=True,
+        duration_minutes=60,
+        completed_at=datetime(2026, 9, 22, 9, 0),
+    )
+
+    assert task.is_due(datetime(2026, 9, 29, 9, 0)) is False
+
+
+# Protects against a regression of the is_due() fall-through where any completed task
+# without a daily or weekly rule counted as always due, so a finished one-off task
+# reappeared in every plan forever.
+
+
+def test_completed_daily_task_is_due_again_at_24_hours():
+    """A finished daily task isn't due at 23h59m after completion, and is due at 24h."""
+    task = Task(
+        task_id="t1",
+        description="Morning walk",
+        time=datetime(2026, 9, 22, 8, 0),
+        frequency="daily",
+        is_completed=True,
+        duration_minutes=30,
+        completed_at=datetime(2026, 9, 22, 8, 30),
+    )
+
+    assert task.is_due(datetime(2026, 9, 23, 8, 29)) is False
+    assert task.is_due(datetime(2026, 9, 23, 8, 30)) is True
+
+
+# Protects the daily rule from being caught up in the non-recurring fix: a completed
+# daily task must still come back exactly 24 hours after it was done.
+
+
+def test_pending_as_needed_task_is_due_once_its_time_arrives():
+    """A not-yet-done one-off task isn't due a minute early, and is due at its time."""
+    task = Task(
+        task_id="t1",
+        description="Vet visit",
+        time=datetime(2026, 9, 22, 8, 0),
+        frequency="as needed",
+        duration_minutes=60,
+    )
+
+    assert task.is_due(datetime(2026, 9, 22, 7, 59)) is False
+    assert task.is_due(datetime(2026, 9, 22, 8, 0)) is True
+
+
+# Protects against the non-recurring fix leaking into the pending branch: a one-off
+# task that hasn't been done yet must still show up once its time arrives.
