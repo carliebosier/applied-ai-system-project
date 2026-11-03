@@ -20,6 +20,7 @@ ALLOWED_FREQUENCIES = ("daily", "weekly", "as needed")
 DEFAULT_FREQUENCY = "as needed"
 
 NO_TASKS_MESSAGE = "I didn't find any pet care tasks"
+ALREADY_SCHEDULED_MESSAGE = "Everything in that request is already on the schedule."
 
 _TIME_PATTERN = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 # strptime alone would accept "2026-1-5", so the exact shape is checked first.
@@ -84,12 +85,24 @@ def validate_request(args: dict, request: str, owner: Owner, now: datetime) -> V
     if errors:
         return ValidationResult(
             status="needs_clarification",
-            errors=errors,
+            # Two tasks can trip the same check with the same wording (e.g. two
+            # unknown "Rex" tasks); the user only needs to be asked once.
+            errors=list(dict.fromkeys(errors)),
             warnings=warnings,
             assumptions=assumptions,
         )
 
     new_tasks = _build_tasks(candidates, owner, plan_date, warnings)
+
+    # Every task was a duplicate, so an "ok" would send an empty plan to approval.
+    if not new_tasks:
+        return ValidationResult(
+            status="needs_clarification",
+            errors=[ALREADY_SCHEDULED_MESSAGE],
+            warnings=warnings,
+            assumptions=assumptions,
+        )
+
     return ValidationResult(
         status="ok",
         new_tasks=new_tasks,
@@ -139,9 +152,15 @@ def _check_pet(pet_name: str, owner: Owner, errors: list[str]) -> str | None:
     if len(matches) == 1:
         return matches[0].pet_id
 
-    # Two pets sharing a name is as ambiguous as no match, so both ask the same question.
+    # Two pets sharing a name is as ambiguous as no match, so both end in the same question.
+    shown_name = pet_name.strip()
+    if matches:
+        problem = f"More than one pet is named '{shown_name}'."
+    else:
+        problem = f"I couldn't find a pet named '{shown_name}'."
     names = ", ".join(pet.name for pet in owner.pets)
-    errors.append(f"Which pet? You have: {names}" if names else "Which pet? You have no pets yet.")
+    question = f"Which pet? You have: {names}" if names else "Which pet? You have no pets yet."
+    errors.append(f"{problem} {question}")
     return None
 
 

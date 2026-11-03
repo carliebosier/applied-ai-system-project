@@ -4,7 +4,7 @@ import copy
 from datetime import date, datetime
 
 from fixture_owner import build_fixture_owner
-from guardrails import NO_TASKS_MESSAGE, validate_request
+from guardrails import ALREADY_SCHEDULED_MESSAGE, NO_TASKS_MESSAGE, validate_request
 from pawpal_system import Owner, Pet, Task
 
 NOW = datetime(2026, 11, 2, 7, 0)
@@ -119,7 +119,25 @@ def test_unknown_pet_asks_which_pet():
     result = _validate([_walk(pet_name="Rex")], request="Rex needs a 30 minute walk at 8:00")
 
     assert result.status == "needs_clarification"
-    assert result.errors == ["Which pet? You have: Biscuit, Whiskers"]
+    assert result.errors == [
+        "I couldn't find a pet named 'Rex'. Which pet? You have: Biscuit, Whiskers"
+    ]
+
+
+def test_identical_errors_are_reported_once_in_first_seen_order():
+    """Two Rex tasks give one Rex question, still ahead of the later time question."""
+    result = _validate(
+        [_walk(pet_name="Rex"), _walk(pet_name="Rex", time="09:00"), _walk(time="25:00")]
+    )
+
+    assert result.errors == [
+        "I couldn't find a pet named 'Rex'. Which pet? You have: Biscuit, Whiskers",
+        "What time for 'Morning walk'?",
+    ]
+
+
+# Protects the clarification UX: a request naming the same unknown pet several times
+# should ask about it once, not repeat the question per task.
 
 
 def test_pet_name_match_is_trimmed_and_case_insensitive():
@@ -139,7 +157,9 @@ def test_two_pets_sharing_a_name_is_ambiguous():
     result = _validate([_walk()], owner=owner)
 
     assert result.status == "needs_clarification"
-    assert result.errors == ["Which pet? You have: Biscuit, Biscuit"]
+    assert result.errors == [
+        "More than one pet is named 'Biscuit'. Which pet? You have: Biscuit, Biscuit"
+    ]
 
 
 # G4: description
@@ -354,8 +374,8 @@ def test_out_of_range_or_bool_budget_is_rejected():
 # G11: duplicates
 
 
-def test_duplicate_of_an_existing_task_is_dropped_with_a_warning():
-    """A walk already on Biscuit's schedule at the same time isn't added twice."""
+def _owner_with_existing_walk():
+    """Build the fixture owner with Biscuit's 08:00 walk already scheduled."""
     owner = build_fixture_owner()
     owner.pets[0].add_task(
         Task(
@@ -366,11 +386,33 @@ def test_duplicate_of_an_existing_task_is_dropped_with_a_warning():
             duration_minutes=30,
         )
     )
+    return owner
 
-    result = _validate([_walk()], owner=owner)
+
+def test_request_that_is_entirely_duplicates_asks_instead_of_returning_ok():
+    """When every task is already scheduled, there's nothing to plan, so the user is told."""
+    result = _validate([_walk()], owner=_owner_with_existing_walk())
+
+    assert result.status == "needs_clarification"
+    assert result.errors == [ALREADY_SCHEDULED_MESSAGE]
+    assert result.new_tasks == []
+    assert len(result.warnings) == 1
+    assert "already on the schedule" in result.warnings[0]
+
+
+# Protects against an "ok" with zero tasks reaching the agent, which would build and ask
+# the user to approve an empty plan for a request that changed nothing.
+
+
+def test_partly_duplicate_request_keeps_the_new_task_and_warns_about_the_rest():
+    """With the walk already scheduled, the meds are still added, and the walk is dropped."""
+    meds = _walk(description="Meds", time="09:00", duration_minutes=5)
+
+    result = _validate([_walk(), meds], owner=_owner_with_existing_walk())
 
     assert result.status == "ok"
-    assert result.new_tasks == []
+    assert result.errors == []
+    assert [(ref, task.description) for _, ref, task in result.new_tasks] == [("new-1", "Meds")]
     assert len(result.warnings) == 1
     assert "already on the schedule" in result.warnings[0]
 
