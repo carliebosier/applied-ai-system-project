@@ -1,16 +1,18 @@
 # PawPal+ Agentic Request Planner — Plan (rev 3)
 
+> Rev 3 of the design, kept in sync with the code through increment 2b. The original rev 3 text is in commit `0c6a295`; differences since then are small and noted inline.
+
 ## Context
 PawPal+ (`pawpal_system.py`: Task, Pet, Owner, Scheduler; a Streamlit UI in `app.py`; a CLI demo in `main.py`) currently takes tasks only through form fields. The class project adds a plain-English entry point. Gemini parses the request into structured tasks. Deterministic guardrails validate each task. The existing `Scheduler.generate_plan()` builds the plan. Gemini can then propose a bounded, same-day revision, only when one of the request's own tasks is in a conflict. The user approves the result before anything changes. The Scheduler remains the only component that decides what gets scheduled.
 
 Decisions already made: **Google Gemini** (`google-genai` SDK). The allowed frequencies are **`daily`, `weekly` and `as needed`**, matching app.py's dropdown. **`as needed` is a one-off task: it's due once its time arrives, and after it's completed it's never due again and doesn't recur** (the behavior after increment 0's `is_due` fix). **Each request covers a single day.** **Revisions may change times only, never dates.** **The revise step runs only when a conflict involves a task from this request.**
 
 ### Gaps in the current code that this plan accounts for
-- `Task.is_due` returns `current_time >= self.time` for pending tasks ([pawpal_system.py:33](applied-ai-system-project/pawpal_system.py#L33)). If the user asks at 7am for "meds at 8am" and the plan runs at `now`, the meds task silently drops out. **The agent therefore plans with `plan_time = 23:59 on the request's date`.** Code picks this value, not the LLM. app.py's existing "Generate schedule" button is left unchanged.
-- `frequency` is a free string, and for a *completed* task any value except daily or weekly falls through to `return True` (always due) ([pawpal_system.py:46-48](applied-ai-system-project/pawpal_system.py#L46-L48)). A completed "as needed" task would therefore reappear in every plan. **Increment 0 fixes this in `pawpal_system.py`** with one change to `is_due`: that branch returns `False`. This matches `next_occurrence()`, which already returns `None` for those frequencies. It's the only change to `pawpal_system.py`, and the file stays at exactly four classes. G6 still restricts *input* to the three supported values.
+- `Task.is_due` returns `current_time >= self.time` for pending tasks ([pawpal_system.py:33](../pawpal_system.py#L33)). If the user asks at 7am for "meds at 8am" and the plan runs at `now`, the meds task silently drops out. **The agent therefore plans with `plan_time = 23:59 on the request's date`.** Code picks this value, not the LLM. app.py's existing "Generate schedule" button is left unchanged.
+- `frequency` is a free string, and for a *completed* task any value except daily or weekly falls through to `return True` (always due) ([pawpal_system.py:46-48](../pawpal_system.py#L46-L48)). A completed "as needed" task would therefore reappear in every plan. **Increment 0 fixes this in `pawpal_system.py`** with one change to `is_due`: that branch returns `False`. This matches `next_occurrence()`, which already returns `None` for those frequencies. It's the only change to `pawpal_system.py`, and the file stays at exactly four classes. G6 still restricts *input* to the three supported values.
 - `duration_minutes=0` always passes `_fits` and can never overlap in `_overlaps`.
-- `find_conflicts` runs on *all due tasks*, including deferred ones ([pawpal_system.py:175](applied-ai-system-project/pawpal_system.py#L175)). Conflict counts can therefore include deferred tasks, and the revision metric uses them as reported.
-- The time-budget widget in app.py is keyed (`key="owner_time_input"`, [app.py:52-61](applied-ai-system-project/app.py#L52-L61)), and its value is written back to `owner.available_time_minutes` on every rerun. After the widget's first render, Streamlit ignores `value=`. So a budget set directly on the owner by `commit()` would be overwritten by the widget's stale value on the next rerun. See increment 10.
+- `find_conflicts` runs on *all due tasks*, including deferred ones ([pawpal_system.py:175](../pawpal_system.py#L175)). Conflict counts can therefore include deferred tasks, and the revision metric uses them as reported.
+- The time-budget widget in app.py is keyed (`key="owner_time_input"`, [app.py:52-61](../app.py#L52-L61)), and its value is written back to `owner.available_time_minutes` on every rerun. After the widget's first render, Streamlit ignores `value=`. So a budget set directly on the owner by `commit()` would be overwritten by the widget's stale value on the next rerun. See increment 10.
 - **main.py's sample data isn't a usable baseline for the agent.** t2 and t5 are pre-existing tasks with the same start time, so they conflict and the agent can't move either one. The 45-minute budget against 70 due minutes guarantees a deferred task. A `clean` result is unreachable there. The agent demo and eval therefore use their own fixture owner (§6), and main.py stays exactly as it is.
 
 ---
@@ -34,7 +36,7 @@ model_card.md            NEW
 docs/sample_trace.log    NEW, committed: a mock run's log with a fixed --now
 requirements.txt         + google-genai, python-dotenv
 .gitignore               + .env, logs/
-.env.example             NEW: GEMINI_API_KEY=, GEMINI_MODEL=gemini-2.5-flash, PAWPAL_LLM_MODE=
+.env.example             NEW: GEMINI_API_KEY=, GEMINI_MODEL= (blank; copy the current id from Google AI Studio), PAWPAL_LLM_MODE=
 ```
 The dependency direction runs one way: `agent → guardrails, llm_client, pawpal_system`. Guardrails import only `pawpal_system` and `datetime`. `fixture_owner` imports only `pawpal_system`.
 
@@ -49,7 +51,7 @@ The dependency direction runs one way: `agent → guardrails, llm_client, pawpal
 5. **Plan.** `plan0 = Scheduler().generate_plan(draft, plan_time)`, with `plan_time = plan_date 23:59`. **Log a summary** (task ids, conflicts, deferred).
 6. **Revision loop** (§5). It runs only if a conflict pair includes a new task. Each proposal is validated, then applied to a *second* deep copy, and the Scheduler runs again. **Log each proposal, its validation and the new plan.**
 7. **Return an `AgentResult`** with: `status`, `new_tasks`, `plan_date`, `budget`, `assumptions`, `warnings`, `original_plan`, `revised_plan | None`, `revision_moves`, `stop_reason`, `revise_calls`, and a `trace` (the same steps that were logged, for the UI).
-8. **Human approval.** The UI or CLI shows the original and revised plans side by side, the deferred tasks, any unmovable conflicts, the assumptions and any **⚠ flagged warnings**. The user picks *Approve revised*, *Approve original* or *Discard*. Only the original exists when there was no revision. `commit(result, owner, use_revision: bool)` adds the chosen versions of the new tasks to the real pets and sets the budget. It does nothing else. **`commit()` mints a fresh `task-{uuid4().hex[:8]}` id for each committed task**, matching app.py's form ([app.py:141](applied-ai-system-project/app.py#L141)). app.py keys its buttons (`complete_{task_id}`) and `pet_name_by_task_id` on `task_id`, so reusing `new-1` across two approved requests would create duplicate widget keys and collide in that dict. Committed tasks are new `Task` objects, not the draft's. **Log the decision**, including a `ref → committed task_id` map.
+8. **Human approval.** The UI or CLI shows the original and revised plans side by side, the deferred tasks, any unmovable conflicts, the assumptions and any **⚠ flagged warnings**. The user picks *Approve revised*, *Approve original* or *Discard*. Only the original exists when there was no revision. `commit(result, owner, use_revision: bool)` adds the chosen versions of the new tasks to the real pets and sets the budget. It does nothing else. **`commit()` mints a fresh `task-{uuid4().hex[:8]}` id for each committed task**, matching app.py's form ([app.py:141](../app.py#L141)). app.py keys its buttons (`complete_{task_id}`) and `pet_name_by_task_id` on `task_id`, so reusing `new-1` across two approved requests would create duplicate widget keys and collide in that dict. Committed tasks are new `Task` objects, not the draft's. **Log the decision**, including a `ref → committed task_id` map.
 
 ## 3. Tool schemas (Gemini function declarations)
 These are plain dict schemas passed as `types.Tool(function_declarations=[...])`, with `tool_config` mode `ANY` and `temperature=0`. There are no Python callables, so the SDK's automatic function calling never runs: our code executes everything.
@@ -83,13 +85,13 @@ The revise system prompt: *"Some of the user's new tasks overlap other tasks. Pr
 The model has no tool that adds or drops tasks, changes durations or dates, or changes the budget.
 
 ## 4. Guardrail rules (guardrails.py)
-**Parse rules**: an **error** stops the whole batch with `needs_clarification`, and each error becomes a question shown to the user. A **warning** is flagged at approval and doesn't block.
+**Parse rules**: an **error** stops the whole batch with `needs_clarification`, and each error becomes a question shown to the user. Every error is collected, per task in the order G3–G8, then G10 and G12, and identical messages are shown once. A **warning** is flagged at approval and doesn't block.
 
 | # | Rule | On failure |
 |---|------|-----------|
 | G1 | Tool name is in the expected set and args have the right shape and types | error, status `llm_bad_output`, no changes |
 | G2 | At least 1 task and at most 10 | error: "I didn't find any pet care tasks" / too many |
-| G3 | `pet_name` matches exactly one owner pet (trimmed, case-insensitive) | error: "Which pet? You have: Biscuit, Whiskers" |
+| G3 | `pet_name` matches exactly one owner pet (trimmed, case-insensitive) | error: "I couldn't find a pet named 'Rex'. Which pet? You have: Biscuit, Whiskers" (or "More than one pet is named '…'." when two pets share the name) |
 | G4 | `description` is not empty and is ≤ 80 characters | error |
 | G5 | `duration_minutes` is present, an int, and in 1–240 (the UI's cap). **Closes the 0-duration gap.** | error: "How many minutes does 'meds' take?" |
 | G6 | `frequency.strip().lower()` is in {daily, weekly, as needed}. This is the **only** place the allowed set is enforced, because the schema has no enum. It keeps unsupported recurrences out at input time, and increment 0 fixes the fall-through inside `Task.is_due` itself | error. If omitted, defaults to `as needed` and is recorded as an **assumption** |
@@ -97,7 +99,7 @@ The model has no tool that adds or drops tasks, changes durations or dates, or c
 | G8 | `time` is present and matches `^([01]\d|2[0-3]):[0-5]\d$` | error: "What time for the walk?" (this is how "this morning" is handled) |
 | G9 | `quote` is a substring of the request (case- and whitespace-normalized), a cheap hallucination check | **warning**: the task is kept and shown at approval with "⚠ couldn't match this to your request: '…'" |
 | G10 | `available_minutes` is an int in 0–1440 | error |
-| G11 | Not a duplicate (same pet, description and datetime) of an existing task or of another task in the batch | duplicate dropped, warning logged and shown |
+| G11 | Not a duplicate (same pet, description and datetime) of an existing task or of another task in the batch | duplicate dropped, warning logged and shown. **If every task is dropped**, error: "Everything in that request is already on the schedule." (increment 2b) |
 | G12 | **All tasks resolve to the same date** (after the G7 defaults) | error: "Your request covers more than one day (Nov 2, Nov 3). Please send one day at a time." |
 
 **Revision rules** (any failure ends the loop and keeps the last good plan)
@@ -199,7 +201,7 @@ Unit tests cover the cases the fixtures can't reach, using a hand-built owner: a
 
 **Commit after each increment** once its test passes: one commit per increment, with a message like `inc 6: revision loop + R1–R4 + movable gate`. That way the history shows the build order, and any increment can be reverted on its own.
 
-0. **Fix `Task.is_due` for non-recurring completed tasks** (its own commit, before anything else: `inc 0: completed non-recurring tasks are not due again`). In [pawpal_system.py:46-48](applied-ai-system-project/pawpal_system.py#L46-L48), change the final `return True` to `return False`, and update the comment to say a completed task with no recurrence rule is done for good, consistent with `next_occurrence()` returning `None`. There are no other changes, and the file still has four classes. *Tests added to `tests/test_pawpal.py`:*
+0. **Fix `Task.is_due` for non-recurring completed tasks** (its own commit, before anything else: `inc 0: completed non-recurring tasks are not due again`). In [pawpal_system.py:46-48](../pawpal_system.py#L46-L48), change the final `return True` to `return False`, and update the comment to say a completed task with no recurrence rule is done for good, consistent with `next_occurrence()` returning `None`. There are no other changes, and the file still has four classes. *Tests added to `tests/test_pawpal.py`:*
    - a completed `"as needed"` task is **not** due, even a week after `completed_at`;
    - a completed `"daily"` task **is** due once 24 hours have passed since `completed_at`, and isn't due before then;
    - a **pending** `"as needed"` task is unaffected: it's not due before its `time` and is due at or after it.
@@ -250,7 +252,7 @@ Unit tests cover the cases the fixtures can't reach, using a hand-built owner: a
     |---|---|---|
     | "Biscuit needs meds at 8am" | G5: no duration | asks "How many minutes does 'meds' take?" — nothing scheduled |
     | "a 30 minute walk this morning" | G8: no exact time | asks "What time for the walk?" |
-    | "Rex needs a 20 minute walk at 10:00" | G3: unknown pet | asks "Which pet? You have: Biscuit, Whiskers" |
+    | "Rex needs a 20 minute walk at 10:00" | G3: unknown pet | asks "I couldn't find a pet named 'Rex'. Which pet? You have: Biscuit, Whiskers" |
     | "…walk every 6 hours" | G6: unsupported frequency | asks to choose daily, weekly or as needed |
     | "walk today at 9, bath tomorrow at 10" | G12: two dates | asks to send one day at a time |
     | "…at 25:00" | G8: invalid time | asks for a valid time |
