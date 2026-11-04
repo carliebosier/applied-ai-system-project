@@ -1,7 +1,12 @@
-from datetime import datetime
+import json
+import os
+from datetime import datetime, timedelta
 from uuid import uuid4
 
 import streamlit as st
+import agent
+import llm_client
+from agent_demo import STOP_MEANINGS
 from pawpal_system import Owner, Pet, Scheduler, Task
 
 st.set_page_config(page_title="PawPal+", page_icon="🐾", layout="centered")
@@ -49,6 +54,11 @@ scheduler = Scheduler()
 
 st.subheader("Owner")
 owner.name = st.text_input("Owner name", value=owner.name, key="owner_name_input")
+# An approved AI plan can set a new budget. The keyed widget ignores value= after its first
+# render and can't be changed once drawn, so the approve handler parks the budget here and
+# reruns; it is handed to the widget before the widget is created.
+if "pending_budget" in st.session_state:
+    st.session_state.owner_time_input = st.session_state.pop("pending_budget")
 owner.available_time_minutes = int(
     st.number_input(
         "Time available today (minutes)",
@@ -235,12 +245,244 @@ if "completion_note" in st.session_state:
 
 st.divider()
 
+# ---------------------------------------------------------------------------
+# Ask PawPal (AI): plan a plain-English request on a draft, then approve it.
+# The agent never touches `owner`; only agent.commit(), after approval, does.
+# ---------------------------------------------------------------------------
+
+MOCK_INFO = (
+    "Mock mode: recorded responses, no API calls. It only understands the six demo "
+    "requests below, and they need pets named Biscuit and Whiskers."
+)
+EXISTING_OVERLAP = "overlap between tasks you already had; I didn't change these"
+
+
+@st.cache_resource
+def _ai_logging_ready() -> bool:
+    """Set up the agent's log file once per process, not on every rerun."""
+    agent.setup_logging()
+    return True
+
+
+def _ai_is_mock() -> bool:
+    """The same test get_client() uses, without building a client or touching the network."""
+    llm_client.load_dotenv(override=False)
+    mode = os.environ.get("PAWPAL_LLM_MODE", "").strip().lower()
+    return mode == "mock" or not os.environ.get("GEMINI_API_KEY", "").strip()
+
+
+def _ai_demo_requests() -> list[str]:
+    """The recorded requests' original text, in file order."""
+    with open(llm_client.FIXTURES_PATH, encoding="utf-8") as handle:
+        return [fixture["request"] for fixture in json.load(handle).values()]
+
+
+def _ai_use_example(text: str) -> None:
+    # A callback runs before the text area is drawn, so it may set the widget's state.
+    st.session_state["ai_request"] = text
+
+
+def _ai_redact(text: str) -> str:
+    """Keep the API key off the page, even if an SDK error message quotes it."""
+    key = os.environ.get("GEMINI_API_KEY", "").strip()
+    return text.replace(key, "***") if key else text
+
+
+def _ai_approvable(result: agent.AgentResult) -> bool:
+    """The same rule agent.commit() enforces."""
+    return result.status == agent.STATUS_OK or (
+        result.status == agent.STATUS_LLM_ERROR and bool(result.new_tasks)
+    )
+
+
+def _ai_bullets(items: list[str]) -> str:
+    return "\n".join(f"- {item}" for item in items)
+
+
+def _ai_show_plan(plan: dict, pet_by_task_id: dict[str, str], new_ids: set[str], budget: int) -> None:
+    """One plan: a table of every due task, the minutes used, then each conflict."""
+    entries = [(task, "scheduled") for task in plan["scheduled"]] + [
+        (task, "deferred") for task in plan["deferred"]
+    ]
+    entries.sort(key=lambda entry: (entry[0].time, entry[0].task_id))
+    if entries:
+        st.table(
+            [
+                {
+                    "Task": task.description,  # no refs in the UI
+                    "Pet": pet_by_task_id.get(task.task_id, "?"),
+                    "Start": task.time.strftime("%H:%M"),
+                    "End": (task.time + timedelta(minutes=task.duration_minutes)).strftime("%H:%M"),
+                    "Min": task.duration_minutes,
+                    "Result": outcome,
+                }
+                for task, outcome in entries
+            ]
+        )
+    used = sum(task.duration_minutes for task in plan["scheduled"])
+    st.markdown(f"Budget: {used} of {budget} min used")
+    for first, second in plan["conflicts"]:
+        if first.task_id in new_ids or second.task_id in new_ids:
+            st.warning(f"⚠️ '{first.description}' and '{second.description}' overlap.")
+        else:
+            st.warning(f"⚠️ '{first.description}' and '{second.description}': {EXISTING_OVERLAP}.")
+
+
+def _ai_close(note: str | None = None) -> None:
+    """Drop the pending result, leave a note for the next run, and rerun."""
+    if note is not None:
+        st.session_state.ai_note = note
+    st.session_state.pop("pending_agent_result", None)
+    st.rerun()
+
+
+def _ai_approve(result: agent.AgentResult, use_revision: bool) -> None:
+    try:
+        ref_to_task_id = agent.commit(result, owner, use_revision=use_revision)
+    except agent.CommitError as exc:
+        # A stale result, such as a pet removed since the run: nothing was changed.
+        st.session_state.ai_error = f"Couldn't apply that plan: {exc} Nothing was changed."
+        _ai_close()
+        return
+    committed_ids = set(ref_to_task_id.values())
+    added = [
+        (pet.name, sum(1 for task in pet.get_tasks() if task.task_id in committed_ids))
+        for pet in owner.pets
+    ]
+    note = "Added " + " and ".join(f"{count} task(s) to {name}" for name, count in added if count) + "."
+    if result.budget is not None:
+        note += f" Time available today is now {result.budget} minutes."
+        st.session_state.pending_budget = result.budget
+    _ai_close(note)
+
+
+def _ai_show_result(result: agent.AgentResult) -> None:
+    """Everything about the pending result, redrawn on every rerun, then the approval buttons."""
+    if result.status == agent.STATUS_NEEDS_CLARIFICATION:
+        st.warning("I need a bit more information:\n" + _ai_bullets(result.errors))
+    elif result.status in (agent.STATUS_LLM_BAD_OUTPUT, agent.STATUS_LLM_ERROR):
+        st.error("Something went wrong with the AI step:\n" + _ai_bullets([_ai_redact(e) for e in result.errors]))
+    elif result.status == agent.STATUS_MOCK_UNKNOWN_REQUEST:
+        st.warning(
+            "Mock mode has no recorded response for that request. It only knows these:\n"
+            + _ai_bullets(result.supported_requests)
+        )
+
+    if result.assumptions:
+        st.info("I assumed:\n" + _ai_bullets(result.assumptions))
+    for warning in result.warnings:
+        st.warning(warning)
+
+    if result.original_plan is not None:
+        pet_name_by_id = {pet.pet_id: pet.name for pet in owner.pets}
+        pet_by_task_id = {task.task_id: pet.name for pet in owner.pets for task in pet.get_tasks()}
+        # In the draft, new tasks carry their refs (new-1, ...) as task_ids.
+        for pet_id, ref, _task in result.new_tasks:
+            pet_by_task_id[ref] = pet_name_by_id.get(pet_id, "?")
+        new_ids = {ref for _pet_id, ref, _task in result.new_tasks}
+        budget = result.budget if result.budget is not None else owner.available_time_minutes
+
+        if result.revised_plan is not None:
+            left, right = st.columns(2)
+            with left:
+                st.markdown("#### Original plan")
+                _ai_show_plan(result.original_plan, pet_by_task_id, new_ids, budget)
+            with right:
+                st.markdown("#### Revised plan")
+                _ai_show_plan(result.revised_plan, pet_by_task_id, new_ids, budget)
+                descriptions = {ref: task.description for _pet_id, ref, task in result.new_tasks}
+                st.markdown(
+                    "Moves:\n"
+                    + _ai_bullets(
+                        [
+                            f"{descriptions.get(move['ref'], '?')}: {move['from']} -> {move['to']} "
+                            f"({move['reason']})"
+                            for move in result.revision_moves
+                        ]
+                    )
+                )
+        else:
+            st.markdown("#### Plan")
+            _ai_show_plan(result.original_plan, pet_by_task_id, new_ids, budget)
+
+        shown = result.revised_plan if result.revised_plan is not None else result.original_plan
+        if shown["deferred"]:
+            st.warning(
+                "Didn't fit in the time budget:\n"
+                + _ai_bullets([f"{task.description} ({task.duration_minutes} min)" for task in shown["deferred"]])
+            )
+
+    if result.stop_reason is not None:
+        meaning = STOP_MEANINGS.get(result.stop_reason, "")
+        st.caption(
+            f"Stop reason: {result.stop_reason}"
+            + (f" ({meaning})" if meaning else "")
+            + f". LLM revise calls: {result.revise_calls}"
+        )
+
+    with st.expander("Agent trace"):
+        st.json(json.loads(_ai_redact(json.dumps(result.trace))))
+
+    if _ai_approvable(result):
+        can_revise = result.status == agent.STATUS_OK and bool(result.revised_new_tasks)
+        buttons = st.columns(3 if can_revise else 2)
+        if can_revise and buttons[0].button("Approve revised plan", key="ai_approve_revised"):
+            _ai_approve(result, use_revision=True)
+        if buttons[-2].button("Approve original plan", key="ai_approve_original"):
+            _ai_approve(result, use_revision=False)
+        if buttons[-1].button("Discard", key="ai_discard"):
+            agent.discard(result)
+            _ai_close("Discarded: nothing was changed.")
+    elif st.button("Dismiss", key="ai_dismiss"):
+        agent.discard(result)
+        _ai_close()
+
+
+_ai_logging_ready()
+
+st.subheader("Ask PawPal (AI)")
+st.caption("Describe a single day of care in plain English; nothing changes until you approve.")
+
+if "ai_note" in st.session_state:
+    st.success(st.session_state.pop("ai_note"))
+if "ai_error" in st.session_state:
+    st.error(st.session_state.pop("ai_error"))
+
+if _ai_is_mock():
+    st.info(MOCK_INFO)
+    with st.expander("Demo requests"):
+        for index, example in enumerate(_ai_demo_requests()):
+            st.markdown(f"{index + 1}. {example}")
+            st.button("Use this request", key=f"ai_example_{index}", on_click=_ai_use_example, args=(example,))
+
+ai_request = st.text_area("What do your pets need?", key="ai_request")
+if st.button("Plan with AI", key="ai_plan_button"):
+    if not ai_request.strip():
+        st.warning("Type a request first.")
+    else:
+        try:
+            # Fresh on every click: a MockClient keeps per-request state.
+            ai_client = llm_client.get_client()
+        except llm_client.LLMConfigError as exc:
+            st.error(_ai_redact(str(exc)))
+        else:
+            with st.spinner("Planning..."):
+                # Replaces any earlier pending result; that one was never committed.
+                st.session_state.pending_agent_result = agent.run_agent(
+                    ai_request, owner, datetime.now(), ai_client
+                )
+
+if "pending_agent_result" in st.session_state:
+    _ai_show_result(st.session_state.pending_agent_result)
+
+st.divider()
+
 st.subheader("Build Schedule")
 st.caption(
     f"Fits the most overdue tasks into {owner.available_time_minutes} minutes, most urgent first."
 )
 
-if st.button("Generate schedule"):
+if st.button("Generate schedule", key="generate_schedule"):
     if not owner.get_all_tasks():
         st.info("Add at least one task before generating a schedule.")
     else:
