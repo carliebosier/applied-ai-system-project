@@ -1,9 +1,14 @@
-"""Tests for the tool schemas, the recorded MockClient, and client selection (no network)."""
+"""Tests for the tool schemas, MockClient, GeminiClient (fake SDK), client selection and the
+smoke-test entry point. No test touches the network."""
 
 import json
+import subprocess
+import sys
 from datetime import datetime
+from types import MappingProxyType, SimpleNamespace
 
 import pytest
+from google.genai import types
 
 import llm_client
 from fixture_owner import build_fixture_owner
@@ -14,13 +19,19 @@ from llm_client import (
     PARSE_TOOLS,
     REVISE_TOOL_NAMES,
     REVISE_TOOLS,
+    GeminiClient,
+    LLMConfigError,
+    LLMResponseError,
     MockClient,
     MockReviseError,
     ToolCall,
     UnknownMockRequest,
     get_client,
+    main,
     normalize_request,
 )
+
+PROJECT_ROOT = FIXTURES_PATH.parent.parent
 
 NOW = datetime(2026, 11, 2, 7, 0)
 
@@ -321,15 +332,313 @@ def test_get_client_returns_mock_when_key_is_blank(monkeypatch, no_dotenv):
     assert isinstance(get_client(), MockClient)
 
 
-def test_get_client_with_a_key_and_no_mode_is_not_implemented_yet(monkeypatch, no_dotenv):
+class RecordingGeminiClient:
+    """Stands in for GeminiClient in get_client tests and records how it was built."""
+
+    instances = []
+
+    def __init__(self, api_key, model, sdk_client=None):
+        self.api_key = api_key
+        self.model = model
+        RecordingGeminiClient.instances.append(self)
+
+
+def test_get_client_with_a_key_and_no_mode_returns_gemini_client(monkeypatch, no_dotenv):
+    RecordingGeminiClient.instances = []
+    monkeypatch.setattr(llm_client, "GeminiClient", RecordingGeminiClient)
     monkeypatch.delenv("PAWPAL_LLM_MODE", raising=False)
     monkeypatch.setenv("GEMINI_API_KEY", "a-real-looking-key")
+    monkeypatch.setenv("GEMINI_MODEL", "some-model-id")
 
-    with pytest.raises(NotImplementedError):
+    client = get_client()
+
+    assert isinstance(client, RecordingGeminiClient)
+    assert RecordingGeminiClient.instances == [client]
+    assert (client.api_key, client.model) == ("a-real-looking-key", "some-model-id")
+
+
+def test_get_client_with_a_blank_model_raises_config_error(monkeypatch, no_dotenv):
+    monkeypatch.delenv("PAWPAL_LLM_MODE", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "a-real-looking-key")
+    monkeypatch.setenv("GEMINI_MODEL", "   ")
+
+    # The model check runs before any SDK client is built.
+    with pytest.raises(LLMConfigError):
         get_client()
 
 
-def test_llm_client_does_not_import_the_gemini_sdk():
-    source = FIXTURES_PATH.parent.parent.joinpath("llm_client.py").read_text(encoding="utf-8")
+def test_blank_model_raises_config_error_even_with_an_sdk_client():
+    with pytest.raises(LLMConfigError, match="GEMINI_MODEL"):
+        GeminiClient("a-real-looking-key", "  ", sdk_client=FakeSDK(_response()))
 
-    assert "google.genai" not in source and "from google" not in source
+
+def test_importing_llm_client_does_not_import_the_gemini_sdk():
+    result = subprocess.run(
+        [sys.executable, "-c", "import sys, llm_client; assert 'google.genai' not in sys.modules"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+# --- GeminiClient with a fake SDK ---------------------------------------------
+
+MODEL = "test-model"
+SYSTEM_PROMPT = "You are a parser."
+
+
+class FakeModels:
+    def __init__(self, response=None, error=None):
+        self.response = response
+        self.error = error
+        self.calls = []
+
+    def generate_content(self, **kwargs):
+        self.calls.append(kwargs)
+        if self.error is not None:
+            raise self.error
+        return self.response
+
+
+class FakeSDK:
+    """Exposes models.generate_content like google.genai.Client, without any network."""
+
+    def __init__(self, response=None, error=None):
+        self.models = FakeModels(response, error)
+
+
+def _fn_part(name, args):
+    return SimpleNamespace(function_call=SimpleNamespace(name=name, args=args), text=None)
+
+
+def _text_part(text):
+    return SimpleNamespace(function_call=None, text=text)
+
+
+def _response(*parts):
+    return SimpleNamespace(candidates=[SimpleNamespace(content=SimpleNamespace(parts=list(parts)))])
+
+
+def _gemini(response=None, error=None):
+    sdk = FakeSDK(response, error)
+    return GeminiClient("a-real-looking-key", MODEL, sdk_client=sdk), sdk
+
+
+def _gemini_parse(client, request=REQUESTS[1]):
+    return client.call("parse", SYSTEM_PROMPT, request, PARSE_TOOLS)
+
+
+def test_gemini_client_is_not_mock():
+    client, _ = _gemini(_response())
+
+    assert client.is_mock is False
+    assert client.model == MODEL
+
+
+def test_a_single_valid_call_returns_a_tool_call_with_plain_copied_args():
+    original = _fixture(2)["parse"]
+    client, _ = _gemini(_response(_fn_part("submit_tasks", original)))
+
+    call = _gemini_parse(client)
+
+    assert call == ToolCall("submit_tasks", _fixture(2)["parse"])
+    assert call.args is not original
+    assert type(call.args) is dict
+    assert type(call.args["tasks"]) is list and type(call.args["tasks"][0]) is dict
+    call.args["tasks"][0]["time"] = "23:00"
+    assert original["tasks"][0]["time"] == "08:00"
+
+
+def test_the_request_is_forced_function_calling_at_temperature_zero():
+    client, sdk = _gemini(_response(_fn_part("submit_tasks", {"tasks": []})))
+
+    _gemini_parse(client, "Biscuit needs a walk.")
+
+    [kwargs] = sdk.models.calls
+    config = kwargs["config"]
+    assert kwargs["model"] == MODEL
+    assert kwargs["contents"] == "Biscuit needs a walk."
+    assert isinstance(config, types.GenerateContentConfig)
+    assert config.temperature == 0
+    assert config.system_instruction == SYSTEM_PROMPT
+    calling = config.tool_config.function_calling_config
+    assert calling.mode == types.FunctionCallingConfigMode.ANY
+    assert set(calling.allowed_function_names) == PARSE_TOOL_NAMES
+    assert config.automatic_function_calling.disable is True
+    [tool] = config.tools
+    assert {fd.name for fd in tool.function_declarations} == PARSE_TOOL_NAMES
+
+
+def test_revise_step_allows_only_the_revise_tools():
+    client, sdk = _gemini(_response(_fn_part("keep_plan", {"reason": "nothing to move"})))
+
+    call = client.call("revise", SYSTEM_PROMPT, "plan", REVISE_TOOLS)
+
+    assert call == ToolCall("keep_plan", {"reason": "nothing to move"})
+    calling = sdk.models.calls[0]["config"].tool_config.function_calling_config
+    assert set(calling.allowed_function_names) == REVISE_TOOL_NAMES
+
+
+def test_a_text_only_response_raises_and_reports_the_text():
+    client, _ = _gemini(_response(_text_part("Sure! " + "x" * 500)))
+
+    with pytest.raises(LLMResponseError, match="got 0") as excinfo:
+        _gemini_parse(client)
+
+    assert "Sure! " in str(excinfo.value)
+    assert "x" * 201 not in str(excinfo.value)
+
+
+def test_two_function_calls_raise():
+    client, _ = _gemini(
+        _response(
+            _fn_part("submit_tasks", {"tasks": []}),
+            _fn_part("ask_clarification", {"question": "Which pet?"}),
+        )
+    )
+
+    with pytest.raises(LLMResponseError, match="got 2"):
+        _gemini_parse(client)
+
+
+def test_an_unknown_tool_name_raises():
+    client, _ = _gemini(_response(_fn_part("move_tasks", {"moves": [], "reason": "x"})))
+
+    with pytest.raises(LLMResponseError, match="move_tasks"):
+        _gemini_parse(client)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        SimpleNamespace(candidates=[]),
+        SimpleNamespace(candidates=None),
+        SimpleNamespace(),
+        SimpleNamespace(candidates=[SimpleNamespace(content=None)]),
+        SimpleNamespace(candidates=[SimpleNamespace(content=SimpleNamespace(parts=None))]),
+    ],
+)
+def test_missing_candidates_content_or_parts_raise_response_error(response):
+    client, _ = _gemini(response)
+
+    with pytest.raises(LLMResponseError):
+        _gemini_parse(client)
+
+
+def test_mapping_args_become_plain_dicts():
+    task = MappingProxyType({"pet_name": "Biscuit", "description": "walk", "quote": "walk"})
+    args = MappingProxyType({"tasks": (task,), "available_minutes": 45.0})
+    client, _ = _gemini(_response(_fn_part("submit_tasks", args)))
+
+    call = _gemini_parse(client)
+
+    assert type(call.args) is dict
+    assert type(call.args["tasks"]) is list
+    assert type(call.args["tasks"][0]) is dict
+    # Whole floats are left for the guardrails, not coerced here.
+    assert call.args["available_minutes"] == 45.0 and type(call.args["available_minutes"]) is float
+    json.dumps(call.args)
+
+
+def test_sdk_exceptions_propagate_unchanged():
+    error = ConnectionError("quota exceeded")
+    client, _ = _gemini(error=error)
+
+    with pytest.raises(ConnectionError) as excinfo:
+        _gemini_parse(client)
+
+    assert excinfo.value is error
+
+
+def test_gemini_unknown_step_raises_value_error():
+    client, sdk = _gemini(_response(_fn_part("submit_tasks", {"tasks": []})))
+
+    with pytest.raises(ValueError):
+        client.call("plan", SYSTEM_PROMPT, REQUESTS[0], PARSE_TOOLS)
+
+    assert sdk.models.calls == []
+
+
+# --- main / smoke test --------------------------------------------------------
+
+
+@pytest.fixture
+def smoke_env(monkeypatch, no_dotenv):
+    monkeypatch.delenv("PAWPAL_LLM_MODE", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "secret-key-123")
+    monkeypatch.setenv("GEMINI_MODEL", "some-model-id")
+
+
+def _fake_gemini_class(result=None, error=None):
+    class FakeGemini:
+        def __init__(self, api_key, model, sdk_client=None):
+            self.model = model
+            self.calls = []
+
+        def call(self, step, system_prompt, user_text, tools):
+            self.calls.append((step, system_prompt, user_text, tools))
+            if error is not None:
+                raise error
+            return result
+
+    return FakeGemini
+
+
+def test_main_without_smoke_prints_usage_and_returns_0(capsys):
+    assert main([]) == 0
+    assert "--smoke" in capsys.readouterr().out
+
+
+def test_smoke_skips_in_mock_mode(monkeypatch, smoke_env, capsys):
+    monkeypatch.setenv("PAWPAL_LLM_MODE", " MOCK ")
+
+    assert main(["--smoke"]) == 0
+    assert capsys.readouterr().out.startswith("SKIP:")
+
+
+def test_smoke_skips_with_a_blank_key(monkeypatch, smoke_env, capsys):
+    monkeypatch.setenv("GEMINI_API_KEY", "  ")
+
+    assert main(["--smoke"]) == 0
+    assert capsys.readouterr().out.startswith("SKIP:")
+
+
+def test_smoke_passes_with_a_valid_tool_call(monkeypatch, smoke_env, capsys):
+    result = ToolCall("submit_tasks", {"tasks": [{"pet_name": "Biscuit"}]})
+    monkeypatch.setattr(llm_client, "GeminiClient", _fake_gemini_class(result=result))
+
+    assert main(["--smoke"]) == 0
+
+    out = capsys.readouterr().out
+    assert "model: some-model-id" in out
+    assert "submit_tasks" in out
+    assert out.rstrip().endswith("SMOKE OK")
+    assert "secret-key-123" not in out
+
+
+def test_smoke_fails_when_the_client_raises(monkeypatch, smoke_env, capsys):
+    error = RuntimeError("bad model secret-key-123")
+    monkeypatch.setattr(llm_client, "GeminiClient", _fake_gemini_class(error=error))
+
+    assert main(["--smoke"]) == 1
+
+    out = capsys.readouterr().out
+    assert "SMOKE FAILED: RuntimeError:" in out
+    assert "secret-key-123" not in out
+
+
+def test_smoke_fails_on_a_non_parse_tool(monkeypatch, smoke_env, capsys):
+    result = ToolCall("keep_plan", {"reason": "x"})
+    monkeypatch.setattr(llm_client, "GeminiClient", _fake_gemini_class(result=result))
+
+    assert main(["--smoke"]) == 1
+    assert "SMOKE FAILED" in capsys.readouterr().out
+
+
+def test_smoke_fails_with_a_blank_model(monkeypatch, smoke_env, capsys):
+    monkeypatch.setenv("GEMINI_MODEL", "")
+
+    assert main(["--smoke"]) == 1
+    assert "SMOKE FAILED: LLMConfigError:" in capsys.readouterr().out
