@@ -1,0 +1,45 @@
+flowchart TD
+    %% PawPal+ agent architecture, as built.
+
+    req["User request<br/>plain English"]
+    client["LLM client<br/>Gemini live, or MockClient for offline runs"]
+    parse["1. Parse<br/>LLM must call a tool: submit_tasks"]
+    guard["2. Guardrails G1-G12<br/>validate every field, all or nothing"]
+    stop["Stop: questions or error shown<br/>nothing scheduled, nothing changed"]
+    plan["3. Draft copy of the owner<br/>Scheduler builds the plan"]
+    gate{"4. Does a conflict involve<br/>one of the new tasks?"}
+    revise["5. Revision loop, max 2 rounds<br/>LLM proposes same-day time moves<br/>rules R1-R4 accept or discard"]
+    result["AgentResult<br/>original plan, revised plan, stop reason"]
+    human{{"6. Human approval<br/>revised / original / discard"}}
+    owner[("Real Owner<br/>changed only by commit()")]
+    log[("Log and trace<br/>logs/agent.log")]
+    tests["Testing<br/>pytest and eval_agent.py"]
+
+    req --> parse
+    client --> parse
+    client --> revise
+    parse -->|"valid tool call"| guard
+    parse -->|"bad output or API error"| stop
+    guard -->|"all rules pass"| plan
+    guard -->|"any rule fails"| stop
+    plan --> gate
+    gate -->|"yes"| revise
+    gate -->|"no"| result
+    revise --> result
+    result --> human
+    human -->|"approve"| owner
+    human -->|"discard"| stop2["Owner unchanged"]
+
+    plan -.-> log
+    tests -.-> guard
+    tests -.-> result
+
+    classDef llm fill:#fde2c8,stroke:#c2620a,color:#3b1d00
+    classDef det fill:#dbe8fb,stroke:#2f5fa8,color:#0f2340
+    classDef human fill:#fbd5e0,stroke:#b0204e,color:#40061a,stroke-width:3px
+    classDef data fill:#dcf3dc,stroke:#2e7d32,color:#0d2a0f
+
+    class client,parse,revise llm
+    class req,guard,plan,gate,result,tests,stop,stop2 det
+    class human human
+    class owner,log data
