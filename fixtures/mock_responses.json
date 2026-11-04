@@ -1,0 +1,183 @@
+{
+  "biscuit needs meds at 8am, a 30 minute walk this morning, and i only have 45 minutes today.": {
+    "request": "Biscuit needs meds at 8am, a 30 minute walk this morning, and I only have 45 minutes today.",
+    "parse": {
+      "available_minutes": 45,
+      "tasks": [
+        {
+          "pet_name": "Biscuit",
+          "description": "meds",
+          "quote": "meds at 8am",
+          "date": "today",
+          "time": "08:00"
+        },
+        {
+          "pet_name": "Biscuit",
+          "description": "walk",
+          "quote": "a 30 minute walk this morning",
+          "date": "today",
+          "duration_minutes": 30
+        }
+      ]
+    },
+    "revise": [],
+    "expect": {
+      "status": "needs_clarification",
+      "stop_reason": null,
+      "revise_calls": 0,
+      "conflicts": 0,
+      "deferred": [],
+      "questions": 2
+    }
+  },
+  "today biscuit needs a 30 minute walk at 8:00 and 5 minutes of meds at 8:15.": {
+    "request": "Today Biscuit needs a 30 minute walk at 8:00 and 5 minutes of meds at 8:15.",
+    "parse": {
+      "tasks": [
+        {
+          "pet_name": "Biscuit",
+          "description": "walk",
+          "quote": "a 30 minute walk at 8:00",
+          "date": "today",
+          "time": "08:00",
+          "duration_minutes": 30
+        },
+        {
+          "pet_name": "Biscuit",
+          "description": "meds",
+          "quote": "5 minutes of meds at 8:15",
+          "date": "today",
+          "time": "08:15",
+          "duration_minutes": 5
+        }
+      ]
+    },
+    "revise": [
+      {
+        "name": "move_tasks",
+        "args": {
+          "moves": [
+            {"ref": "new-2", "time": "08:30"}
+          ],
+          "reason": "Moving meds to 08:30 starts it right after the walk ends, removing the overlap."
+        }
+      }
+    ],
+    "expect": {
+      "status": "ok",
+      "stop_reason": "clean",
+      "revise_calls": 1,
+      "conflicts": 0,
+      "deferred": []
+    }
+  },
+  "i only have 30 minutes today. biscuit needs a 25 minute walk at 9:00 and whiskers needs a 20 minute brushing at 17:00.": {
+    "request": "I only have 30 minutes today. Biscuit needs a 25 minute walk at 9:00 and Whiskers needs a 20 minute brushing at 17:00.",
+    "parse": {
+      "available_minutes": 30,
+      "tasks": [
+        {
+          "pet_name": "Biscuit",
+          "description": "walk",
+          "quote": "a 25 minute walk at 9:00",
+          "date": "today",
+          "time": "09:00",
+          "duration_minutes": 25
+        },
+        {
+          "pet_name": "Whiskers",
+          "description": "brushing",
+          "quote": "a 20 minute brushing at 17:00",
+          "date": "today",
+          "time": "17:00",
+          "duration_minutes": 20
+        }
+      ]
+    },
+    "revise": [],
+    "expect": {
+      "status": "ok",
+      "stop_reason": "no_movable_conflicts",
+      "revise_calls": 0,
+      "conflicts": 0,
+      "deferred": ["brushing"]
+    }
+  },
+  "rex needs a 20 minute walk at 10:00 today.": {
+    "request": "Rex needs a 20 minute walk at 10:00 today.",
+    "parse": {
+      "tasks": [
+        {
+          "pet_name": "Rex",
+          "description": "walk",
+          "quote": "a 20 minute walk at 10:00 today",
+          "date": "today",
+          "time": "10:00",
+          "duration_minutes": 20
+        }
+      ]
+    },
+    "revise": [],
+    "expect": {
+      "status": "needs_clarification",
+      "stop_reason": null,
+      "revise_calls": 0,
+      "conflicts": 0,
+      "deferred": []
+    }
+  },
+  "biscuit needs a 20 minute walk today at 9:00 and whiskers needs a 15 minute bath tomorrow at 10:00.": {
+    "request": "Biscuit needs a 20 minute walk today at 9:00 and Whiskers needs a 15 minute bath tomorrow at 10:00.",
+    "parse": {
+      "tasks": [
+        {
+          "pet_name": "Biscuit",
+          "description": "walk",
+          "quote": "a 20 minute walk today at 9:00",
+          "date": "today",
+          "time": "09:00",
+          "duration_minutes": 20
+        },
+        {
+          "pet_name": "Whiskers",
+          "description": "bath",
+          "quote": "a 15 minute bath tomorrow at 10:00",
+          "date": "tomorrow",
+          "time": "10:00",
+          "duration_minutes": 15
+        }
+      ]
+    },
+    "revise": [],
+    "expect": {
+      "status": "needs_clarification",
+      "stop_reason": null,
+      "revise_calls": 0,
+      "conflicts": 0,
+      "deferred": []
+    }
+  },
+  "biscuit needs a 15 minute walk at 9:00, every 6 hours.": {
+    "request": "Biscuit needs a 15 minute walk at 9:00, every 6 hours.",
+    "parse": {
+      "tasks": [
+        {
+          "pet_name": "Biscuit",
+          "description": "walk",
+          "quote": "a 15 minute walk at 9:00, every 6 hours",
+          "time": "09:00",
+          "duration_minutes": 15,
+          "frequency": "every 6 hours"
+        }
+      ]
+    },
+    "revise": [],
+    "expect": {
+      "status": "needs_clarification",
+      "stop_reason": null,
+      "revise_calls": 0,
+      "conflicts": 0,
+      "deferred": []
+    }
+  }
+}
