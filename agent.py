@@ -1,7 +1,8 @@
 """The agent: parse a plain-English request with an LLM, validate it, plan it on a draft copy,
 and let the LLM propose bounded same-day revisions when the request's own tasks conflict.
 
-The real Owner is never modified here. commit() comes in a later increment.
+run_agent() never modifies the real Owner. Only commit(), called after the user approves,
+adds the chosen tasks and budget to it; discard() records a rejection and touches no owner.
 """
 
 from __future__ import annotations
@@ -99,6 +100,12 @@ class AgentResult:
     revise_calls: int = 0
     supported_requests: list[str] = field(default_factory=list)  # only for mock_unknown_request
     trace: list[dict] = field(default_factory=list)
+    # Set once by commit() or discard(): "approve_revised", "approve_original" or "discard".
+    decision: str | None = None
+
+
+class CommitError(ValueError):
+    """commit() or discard() refused; nothing on the owner or the result was changed."""
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +291,92 @@ def run_agent(
         stop_reason=stop_reason,
         revise_calls=state.revise_calls,
     )
+
+
+# ---------------------------------------------------------------------------
+# Human approval (plan §2 step 8)
+# ---------------------------------------------------------------------------
+
+DECISION_APPROVE_REVISED = "approve_revised"
+DECISION_APPROVE_ORIGINAL = "approve_original"
+DECISION_DISCARD = "discard"
+
+
+def commit(result: AgentResult, owner: Owner, use_revision: bool) -> dict[str, str]:
+    """Add the approved version of the new tasks to the real owner; return {ref: new task_id}.
+
+    Every check runs before anything changes, so a CommitError leaves the owner and the
+    result exactly as they were. Committed tasks are new Task objects with fresh
+    task-<8 hex> ids, matching app.py's form, so refs like new-1 never reach the owner.
+    """
+    if result.decision is not None:
+        raise CommitError(f"This result was already decided ({result.decision}).")
+    committable = result.status == STATUS_OK or (
+        result.status == STATUS_LLM_ERROR and bool(result.new_tasks)
+    )
+    if not committable:
+        raise CommitError(f"A result with status {result.status!r} has nothing to commit.")
+    if use_revision and (result.status != STATUS_OK or not result.revised_new_tasks):
+        raise CommitError("There is no accepted revision to approve.")
+
+    chosen = result.revised_new_tasks if use_revision else result.new_tasks
+    pets_by_id = {pet.pet_id: pet for pet in owner.pets}
+    missing = sorted({pet_id for pet_id, _ref, _task in chosen} - pets_by_id.keys())
+    if missing:
+        raise CommitError(f"The owner no longer has pet(s) {', '.join(missing)}.")
+
+    # Build everything first; the owner is only mutated once nothing else can fail.
+    taken = {task.task_id for task in owner.get_all_tasks()}
+    additions: list[tuple[str, str, Task]] = []
+    for pet_id, ref, task in chosen:
+        task_id = _new_task_id(taken)
+        taken.add(task_id)
+        fresh = Task(
+            task_id=task_id,
+            description=task.description,
+            time=task.time,
+            frequency=task.frequency,
+            is_completed=False,
+            duration_minutes=task.duration_minutes,
+        )
+        additions.append((pet_id, ref, fresh))
+
+    for pet_id, _ref, fresh in additions:
+        pets_by_id[pet_id].add_task(fresh)
+    if result.budget is not None:
+        owner.available_time_minutes = result.budget
+
+    ref_to_task_id = {ref: fresh.task_id for _pet_id, ref, fresh in additions}
+    result.decision = DECISION_APPROVE_REVISED if use_revision else DECISION_APPROVE_ORIGINAL
+    _log(
+        result.run_id,
+        "approval",
+        {
+            "decision": result.decision,
+            "status": result.status,
+            "stop_reason": result.stop_reason,
+            "budget": result.budget,
+            "ref_to_task_id": ref_to_task_id,
+        },
+        result.trace,
+    )
+    return ref_to_task_id
+
+
+def discard(result: AgentResult) -> None:
+    """Record that the user rejected this result; no owner is touched. Works for any status."""
+    if result.decision is not None:
+        raise CommitError(f"This result was already decided ({result.decision}).")
+    result.decision = DECISION_DISCARD
+    _log(result.run_id, "approval", {"decision": DECISION_DISCARD}, result.trace)
+
+
+def _new_task_id(taken: set[str]) -> str:
+    """A task-<8 hex> id (app.py's form) not in `taken`, regenerated on a collision."""
+    while True:
+        task_id = f"task-{uuid.uuid4().hex[:8]}"
+        if task_id not in taken:
+            return task_id
 
 
 # ---------------------------------------------------------------------------
