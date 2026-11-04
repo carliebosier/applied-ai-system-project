@@ -1,10 +1,15 @@
 """Tests for the guardrails that check the LLM's parsed request before it reaches the Owner."""
 
 import copy
-from datetime import date, datetime
+from datetime import date, datetime, time
 
 from fixture_owner import build_fixture_owner
-from guardrails import ALREADY_SCHEDULED_MESSAGE, NO_TASKS_MESSAGE, validate_request
+from guardrails import (
+    ALREADY_SCHEDULED_MESSAGE,
+    NO_TASKS_MESSAGE,
+    parse_time_of_day,
+    validate_request,
+)
 from pawpal_system import Owner, Pet, Task
 
 NOW = datetime(2026, 11, 2, 7, 0)
@@ -333,6 +338,14 @@ def test_time_is_stripped_before_matching():
     result = _validate([_walk(time=" 08:00 ")])
 
     assert result.status == "ok"
+
+
+def test_parse_time_of_day_applies_the_g8_rule():
+    """The public helper accepts exactly what G8 accepts and returns None for everything else."""
+    assert parse_time_of_day("08:00") == time(8, 0)
+    assert parse_time_of_day(" 08:00 ") == time(8, 0)
+    for bad in ("25:00", "8:00", None, 800):
+        assert parse_time_of_day(bad) is None, bad
 
 
 # G9: quote

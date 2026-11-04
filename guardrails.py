@@ -257,13 +257,23 @@ def _parse_date(value: object, today: date) -> date | None:
         return None
 
 
-def _check_time(value: object, description: str, errors: list[str]) -> time | None:
-    """G8: require an exact 24-hour HH:MM start time rather than guessing one."""
+def parse_time_of_day(value: object) -> time | None:
+    """G8's rule on its own: a stripped 24-hour HH:MM string becomes a time, anything else None.
+
+    Shared with the agent's revision check (R2), so both steps accept exactly the same times.
+    """
     text = value.strip() if isinstance(value, str) else ""
     if not _TIME_PATTERN.match(text):
-        errors.append(f"What time for '{description}'?")
         return None
     return datetime.strptime(text, "%H:%M").time()
+
+
+def _check_time(value: object, description: str, errors: list[str]) -> time | None:
+    """G8: require an exact 24-hour HH:MM start time rather than guessing one."""
+    at = parse_time_of_day(value)
+    if at is None:
+        errors.append(f"What time for '{description}'?")
+    return at
 
 
 def _check_quote(raw: dict, request: str, warnings: list[str]) -> None:
