@@ -19,6 +19,8 @@ st.markdown(
 for their pet(s) based on constraints like available time and how overdue each task is.
 
 This app is the interactive demo for the classes in `pawpal_system.py`.
+
+New: describe a day of care in plain English in **Ask PawPal (AI)** below, and the AI will propose a plan for you to approve.
 """
 )
 
@@ -442,6 +444,7 @@ _ai_logging_ready()
 
 st.subheader("Ask PawPal (AI)")
 st.caption("Describe a single day of care in plain English; nothing changes until you approve.")
+st.caption("Pets I know: " + ", ".join(pet.name for pet in owner.pets))
 
 if "ai_note" in st.session_state:
     st.success(st.session_state.pop("ai_note"))
