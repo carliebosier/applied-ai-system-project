@@ -1,6 +1,6 @@
 # PawPal+ Agentic Request Planner
 
-**Base project:** PawPal+ (Module 2). PawPal+ was a Streamlit app and Python library (`Task`, `Pet`, `Owner`, `Scheduler`) that helps a pet owner plan daily care. It tracked tasks with durations and recurrence, sorted and filtered them, detected overlapping tasks, and fit due tasks into the owner's time budget with a line-by-line explanation. Tasks went in only through form fields.
+**Base project:** PawPal+ (Module 2). PawPal+ was a Streamlit app and Python library (`Task`, `Pet`, `Owner`, `Scheduler`) that helps a pet owner plan daily care. It tracked tasks with durations and recurrence, sorted and filtered them, detected overlapping tasks, and fit due tasks into the owner's time budget with a line-by-line explanation. Tasks went in only through form fields. `python main.py` still runs the original Module 2 CLI demo (sorting, filtering, scheduled vs. deferred, conflict detection). The original Streamlit sections (Owner, Pets, Tasks, Build Schedule) are unchanged; "Ask PawPal (AI)" sits between Tasks and Build Schedule.
 
 **This project** adds a plain-English entry point on top of it: *"Today Biscuit needs a 30 minute walk at 8:00 and 5 minutes of meds at 8:15."* An LLM parses the request, deterministic guardrails validate it, the existing `Scheduler` builds the plan, the LLM may propose a bounded same-day fix when the request's own tasks overlap, and **nothing changes until the user approves**.
 
