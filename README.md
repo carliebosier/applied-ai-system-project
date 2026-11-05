@@ -1,173 +1,249 @@
-# PawPal+ (Module 2 Project)
+# PawPal+ Agentic Request Planner
 
-**PawPal+** is a Streamlit app that helps a pet owner plan daily care tasks for their pets, then explains the plan it produced.
+**Base project:** PawPal+ (Module 2). PawPal+ was a Streamlit app and Python library (`Task`, `Pet`, `Owner`, `Scheduler`) that helps a pet owner plan daily care. It tracked tasks with durations and recurrence, sorted and filtered them, detected overlapping tasks, and fit due tasks into the owner's time budget with a line-by-line explanation. Tasks went in only through form fields.
 
-## Scenario
+**This project** adds a plain-English entry point on top of it: *"Today Biscuit needs a 30 minute walk at 8:00 and 5 minutes of meds at 8:15."* An LLM parses the request, deterministic guardrails validate it, the existing `Scheduler` builds the plan, the LLM may propose a bounded same-day fix when the request's own tasks overlap, and **nothing changes until the user approves**.
 
-A busy pet owner needs help staying consistent with pet care. They want an assistant that can:
+## Why it matters
 
-- Track pet care tasks (walks, feeding, meds, enrichment, grooming, etc.)
-- Work within real constraints, primarily the time available in a day and how overdue each task is
-- Produce a daily plan and explain why it chose that plan
+LLMs are good at reading messy text and bad at being trusted with someone's schedule. This system uses the LLM only for the part it is good at (parsing, and proposing a time move) and keeps every decision that matters in code: validation, scheduling, conflict checks, and the final write to the owner.
 
-The system was designed first as a UML diagram, then implemented in Python, then connected to the Streamlit UI.
+## Architecture overview
 
-## What PawPal+ Does
+Source: [`diagrams/architecture.mmd`](diagrams/architecture.mmd) (Mermaid). Colors: orange = LLM call, blue = deterministic code, pink = human checkpoint, green = data or state.
 
-The finished app supports:
+1. **Parse.** The LLM must call a tool (`submit_tasks` or `ask_clarification`). It cannot return free text.
+2. **Guardrails (G1-G12).** Every field is validated in code. Any error stops the whole batch (all or nothing) and the user is asked a question.
+3. **Draft and plan.** The tasks are added to a *copy* of the owner and the existing `Scheduler.generate_plan` runs at 23:59 on the request's date.
+4. **Gate.** The LLM is only asked to revise if a conflict involves one of the new tasks. Over-budget plans and conflicts among existing tasks never reach it.
+5. **Revision loop (max 2 rounds).** The LLM proposes same-day time moves. Rules R1-R4 check them, the Scheduler re-plans, and a move is kept only if it strictly reduces conflicts without deferring more tasks.
+6. **Human approval.** The user picks revised, original, or discard. Only `commit()` writes to the real owner.
 
-- **Owner and pet information** — an owner name, a daily time budget, and one or more pets
-- **Care tasks** — each with a description, date, start time, duration, and recurrence setting
-- **Completion status** — tasks are pending or done
-- **Recurrence** — completing a daily or weekly task automatically creates its next occurrence
-- **Chronological sorting** — tasks display in scheduled-time order rather than insertion order
-- **Filtering** — by pet and by completion status
-- **Schedule generation** — fits due tasks into the owner's available minutes
-- **Scheduled vs. deferred** — tasks that didn't fit the budget are listed separately, not dropped
-- **Explanations** — a line-by-line account of why each task was scheduled or deferred
-- **Conflict detection** — overlapping pending tasks are surfaced as visible warnings
+Every step is logged to `logs/agent.log`.
 
-Ordering for schedule generation is based on completion state, scheduled time, task duration, and task ID. There is no manual priority field.
-
-## Getting Started
-
-### Setup
+## Setup
 
 ```bash
+git clone https://github.com/carliebosier/applied-ai-system-project.git 
+cd applied-ai-system-project
 python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+cp .env.example .env
 ```
 
-### Running
+**Mock mode (no API key needed, deterministic):** leave `GEMINI_API_KEY` blank, or set `PAWPAL_LLM_MODE=mock` in `.env`. Mock mode replays recorded responses from `fixtures/mock_responses.json` and understands the six demo requests below.
+
+**Live mode:** put your key in `GEMINI_API_KEY` and a current model id from Google AI Studio in `GEMINI_MODEL` (no default is built in), and leave `PAWPAL_LLM_MODE` blank. Verify it with:
 
 ```bash
-streamlit run app.py   # the interactive app
-python main.py         # the CLI demo shown below
+python llm_client.py --smoke
 ```
 
-### Suggested workflow
+`.env` is gitignored. Never commit it.
 
-1. Read the scenario carefully and identify requirements and edge cases.
-2. Draft a UML diagram (classes, attributes, methods, relationships).
-3. Convert UML into Python class stubs (no logic yet).
-4. Implement scheduling logic in small increments.
-5. Add tests to verify key behaviors.
-6. Connect the logic to the Streamlit UI in `app.py`.
-7. Refine the UML so it matches what was actually built.
-
-## 💻 Sample CLI Output
-
-`python main.py` builds sample data for two pets and prints the result. It demonstrates sorting, both filters, the scheduled/deferred split, the explanations, and conflict detection:
-
-```text
-========================================
-        ALL TASKS, SORTED BY TIME
-========================================
-  - [Sep 18, 11:20 AM] Weekly nail trim
-  - [Sep 25, 11:20 AM] Morning walk
-  - [Sep 26, 08:20 AM] Litter box scoop
-  - [Sep 26, 10:20 AM] Evening medication
-  - [Sep 26, 10:20 AM] Evening playtime
-
-========================================
-        FILTER: BISCUIT'S TASKS ONLY
-========================================
-  - Evening medication
-  - Morning walk
-  - Evening playtime
-
-========================================
-        FILTER: COMPLETED TASKS ONLY
-========================================
-  - Litter box scoop
-
-========================================
-        TODAY'S SCHEDULE
-========================================
-
-Scheduled:
-  - Weekly nail trim (20 min)
-  - Evening medication (5 min)
-  - Evening playtime (15 min)
-
-Deferred:
-  - Morning walk (30 min)
-
-Why these choices:
-  - Scheduled 'Weekly nail trim' (20 min): it fit the time left, leaving 25 min.
-  - Deferred 'Morning walk' (30 min): only 25 min left in the budget.
-  - Scheduled 'Evening medication' (5 min): it fit the time left, leaving 20 min.
-  - Scheduled 'Evening playtime' (15 min): it fit the time left, leaving 5 min.
-  - Warning: 'Evening medication' and 'Evening playtime' overlap — both run at the same time.
-
-Conflicts detected:
-  - 'Evening medication' overlaps 'Evening playtime'
-
-========================================
-```
-
-## 🧪 Testing PawPal+
+### Run it
 
 ```bash
-# Run the full test suite:
-python -m pytest
-
-# Run with coverage:
-pytest --cov
+python agent_demo.py --mock --now 2026-11-02T07:00 --yes   # all six demo requests
+python agent_demo.py --mock "Rex needs a 20 minute walk at 10:00 today."   # one request, asks before committing
+python eval_agent.py                                        # 6 fixtures, PASS/FAIL table
+python -m pytest -q                                         # full test suite
+PAWPAL_LLM_MODE=mock streamlit run app.py                   # UI: see "Ask PawPal (AI)"
 ```
 
-Current results — **15 tests passing, 95% total coverage**, with `pawpal_system.py` at 89%:
+In the UI, add pets named **Biscuit** and **Whiskers** first (the mock fixtures use those names), then open "Demo requests" under "Ask PawPal (AI)".
+
+## Sample interactions
+
+All outputs below are real, from `python agent_demo.py --mock --now 2026-11-02T07:00 --yes`. Mock mode replays recorded model responses; see "Live model check" for a real Gemini call.
+
+### 1. A conflict the agent fixes (agent workflow)
+
+Input: `Today Biscuit needs a 30 minute walk at 8:00 and 5 minutes of meds at 8:15.`
 
 ```text
-=================================================================== test session starts ===================================================================
-platform darwin -- Python 3.14.7, pytest-9.1.1, pluggy-1.6.0
-rootdir: /Users/carliebosier/Documents/Howard Stuff/HU Fall 2026/Intro to AI/ai110-module2show-pawpal-starter
-plugins: cov-7.1.0, anyio-4.15.1
-collected 15 items
+Status: ok
+Assumptions:
+  - No frequency given for 'walk', so it's set to 'as needed' (one time).
+  - No frequency given for 'meds', so it's set to 'as needed' (one time).
+Original plan:
+  Task        Pet      Start  End    Min  Result
+  ----------  -------  -----  -----  ---  ---------
+  new-1 walk  Biscuit  08:00  08:30   30  scheduled
+  new-2 meds  Biscuit  08:15  08:20    5  scheduled
+  Conflict: walk overlaps meds
+  Budget: 35 of 120 min used
+Revision moves:
+  new-2 meds: 08:15 -> 08:30 (Moving meds to 08:30 starts it right after the walk ends, removing the overlap.)
+Revised plan:
+  Task        Pet      Start  End    Min  Result
+  ----------  -------  -----  -----  ---  ---------
+  new-1 walk  Biscuit  08:00  08:30   30  scheduled
+  new-2 meds  Biscuit  08:30  08:35    5  scheduled
+  Budget: 35 of 120 min used
+Stop reason: clean (no conflicts and nothing deferred)
+LLM revise calls: 1
 
-tests/test_pawpal.py ...............                                                                                                                [100%]
-
-===================================================================== tests coverage ======================================================================
-____________________________________________________ coverage: platform darwin, python 3.14.7-final-0 _____________________________________________________
-
-Name                   Stmts   Miss  Cover
-------------------------------------------
-conftest.py                0      0   100%
-pawpal_system.py         112     12    89%
-tests/test_pawpal.py     108      0   100%
-------------------------------------------
-TOTAL                    220     12    95%
-=================================================================== 15 passed in 0.05s ====================================================================
+Approved the revised plan.
+Committed to the owner:
+  Biscuit: walk at 08:00 (30 min)
+  Biscuit: meds at 08:30 (5 min)
 ```
 
-![pytest verbose output listing all 15 tests as PASSED](screenshots/pytest--verbose.png)
+The `new-N` labels are stable refs used inside the agent; the real tasks get fresh ids when committed.
 
-![pytest coverage report showing 95% total coverage, 15 passed](screenshots/pytest--cov.png)
+### 2. Over budget: the LLM is deliberately not asked
 
-### Confidence Level: 4/5
+Input: `I only have 30 minutes today. Biscuit needs a 25 minute walk at 9:00 and Whiskers needs a 20 minute brushing at 17:00.`
 
-I feel good about the core scheduling logic. All 15 tests pass with 95% coverage, and they cover the behaviors that actually matter — sorting, filtering, recurrence, and conflict detection — not just the easy happy paths.
+```text
+Status: ok
+Original plan:
+  Task            Pet       Start  End    Min  Result
+  --------------  --------  -----  -----  ---  ---------
+  new-1 walk      Biscuit   09:00  09:25   25  scheduled
+  new-2 brushing  Whiskers  17:00  17:20   20  deferred
+  Budget: 25 of 30 min used
+Stop reason: no_movable_conflicts (nothing the LLM may fix; deferred tasks and conflicts among existing tasks are left to you)
+LLM revise calls: 0
 
-I'm not giving it a full 5, though. While testing I found a real bug where completing a task could let its next occurrence show up as due immediately instead of the following day, and I had a separate bug in one of my own tests where I mixed up two task IDs. Both are fixed, but it was a good reminder that passing tests don't automatically mean the logic is airtight. About 11% of `pawpal_system.py` is still uncovered.
+Approved the original plan.
+Committed to the owner:
+  Biscuit: walk at 09:00 (25 min)
+  Whiskers: brushing at 17:00 (20 min)
+  Budget: 120 -> 30 min
+```
 
-## 📐 Smarter Scheduling
+Deferred tasks are reported to the user. They are never handed to the LLM, which could otherwise "fix" them by moving work out of the day.
 
-| Feature | Method(s) | Notes |
-|---------|-----------|-------|
-| Task sorting | `Scheduler.sort_by_time(tasks)` | Sorts chronologically by scheduled `time`, with `task_id` breaking ties. Distinct from `_sort_by_priority()`, which orders due tasks by completion state, scheduled time, duration, and task ID when building the plan. |
-| Filtering | `Owner.get_tasks_for_pet(pet_id)`, `Owner.get_tasks_by_status(is_completed)` | Return one pet's tasks, or tasks matching a completion status. Both return a new list, so filtering never mutates the stored task data. |
-| Conflict handling | `Scheduler.find_conflicts(tasks)` | Pairs up pending tasks whose durations overlap, including non-adjacent overlaps (a long task colliding with one two slots later). Completed tasks are excluded. Report-only — conflicts never change or block what gets scheduled, and surface through `generate_plan()`'s `"conflicts"` key and its explanations. |
-| Recurring tasks | `Task.next_occurrence()`, `Pet.complete_task(task_id)` | Completing a daily task advances one day; a weekly task advances seven. The next occurrence is based on the original scheduled time plus the interval, not the completion time, so a late completion doesn't drift the schedule. |
+### 3. Guardrails stop a vague request
 
-## 🎬 Demo Walkthrough
+Input: `Biscuit needs meds at 8am, a 30 minute walk this morning, and I only have 45 minutes today.`
 
-1. **Set up the owner.** Enter the owner name and the minutes available today in the **Owner** section.
-2. **Add a pet.** Enter a name, pick a species, and click **Add pet**. Tasks can't be added until at least one pet exists.
-3. **Add a care task.** Choose which pet it belongs to, then enter a title, duration, and frequency (daily, weekly, or as needed), plus the date and start time it's scheduled for.
-4. **Review the task list.** The table shows every task in chronological order. Use **Filter by pet** and **Filter by status** (All / Pending / Completed) to narrow it down.
-5. **Complete a recurring task.** Click the **Mark '…' done** button beneath the table. The task flips to `done` and, if it recurs, the next occurrence appears in the table with its new date.
-6. **Generate the plan.** Click **Generate schedule**. The scheduler fits due tasks into the available minutes and lists what it booked.
-7. **Read the split and the reasoning.** Tasks that fit appear under *Today's plan*; anything that exceeded the remaining budget appears under *Deferred*. The *Why the scheduler made these calls* panel explains each decision, with the minutes left after each one.
-8. **Watch for conflicts.** If two pending tasks overlap in time, a warning appears at the top of the results and in the explanations. Conflicts are informational — they don't stop the schedule from being generated.
+```text
+Status: needs_clarification
+  Question: How many minutes does 'meds' take?
+  Question: What time for 'walk'?
+LLM revise calls: 0
+```
 
+Nothing is scheduled and nothing is committed. The LLM was told never to invent a time or duration, and the guardrails check that it didn't.
+
+### Live model check
+
+`python llm_client.py --smoke` makes one real Gemini call (model `gemini-3.6-flash`) and verifies the response is exactly one valid tool call:
+
+```text
+model: gemini-3.6-flash
+request: Biscuit needs meds at 8am, a 30 minute walk this morning, and I only have 45 minutes today.
+tool: submit_tasks
+{
+  "tasks": [
+    {
+      "quote": "Biscuit needs meds at 8am",
+      "pet_name": "Biscuit",
+      "description": "meds",
+      "date": "today",
+      "time": "08:00"
+    },
+    {
+      "date": "today",
+      "pet_name": "Biscuit",
+      "duration_minutes": 30,
+      "quote": "a 30 minute walk this morning",
+      "description": "walk"
+    }
+  ],
+  "available_minutes": 45
+}
+SMOKE OK
+```
+
+The model left out the meds duration and the walk time instead of inventing them, which is what the guardrails rely on.
+
+## Reliability and guardrail results
+
+### Evaluation script
+
+`python eval_agent.py` runs all six fixtures through the real agent and compares each to its expected status, stop reason, LLM call count, conflicts, and deferred tasks:
+
+```text
+#  Request                                             Status               Stop reason           Calls  Result
+-  --------------------------------------------------  -------------------  --------------------  -----  ------
+1  Biscuit needs meds at 8am, a 30 minute walk thi...  needs_clarification  -                     0      PASS
+2  Today Biscuit needs a 30 minute walk at 8:00 an...  ok                   clean                 1      PASS
+3  I only have 30 minutes today. Biscuit needs a 2...  ok                   no_movable_conflicts  0      PASS
+4  Rex needs a 20 minute walk at 10:00 today.          needs_clarification  -                     0      PASS
+5  Biscuit needs a 20 minute walk today at 9:00 an...  needs_clarification  -                     0      PASS
+6  Biscuit needs a 15 minute walk at 9:00, every 6...  needs_clarification  -                     0      PASS
+
+6/6 passed
+```
+
+### Guardrail examples
+
+| Input | Guardrail | Result |
+|---|---|---|
+| `meds at 8am` (no duration) | G5: duration required | Asks "How many minutes does 'meds' take?" Nothing scheduled. |
+| `a 30 minute walk this morning` | G8: exact time required | Asks "What time for 'walk'?" |
+| `Rex needs a 20 minute walk at 10:00 today.` | G3: unknown pet | "I couldn't find a pet named 'Rex'. Which pet? You have: Biscuit, Whiskers" |
+| `walk today at 9:00 ... bath tomorrow at 10:00` | G12: one day per request | "Your request covers more than one day (Nov 2, Nov 3). Please send one day at a time." |
+| `a 15 minute walk at 9:00, every 6 hours` | G6: only daily, weekly, as needed | "How often should 'walk' happen? I can schedule daily, weekly or as needed, not 'every 6 hours'." |
+| Task quote not found in the request | G9: hallucination check | Task kept, warning shown at approval |
+| Walk 08:00-08:30 and meds 08:15 | Revision loop | Meds moved to 08:30, ends `clean` (sample 1) |
+| 30-minute budget, 45 minutes of tasks | Gate | 0 LLM calls, `no_movable_conflicts`, brushing reported as deferred |
+| LLM tries to move a pre-existing task, or past midnight | R1 / R2 | Proposal rejected, `invalid_revision`, last good plan kept |
+| Revise call fails (e.g. a 503) | Error handling | `llm_error`, last good plan kept; the original can still be approved |
+
+Each row is covered by a test in `tests/`.
+
+### Test summary
+
+```text
+$ python -m pytest -q
+277 passed in 2.49s
+```
+
+- Guardrails G1-G12, the revision rules, the commit/discard step, the CLI, the eval script, the Streamlit section (via Streamlit's `AppTest`), and the committed trace are all tested. No test uses the network.
+- **What worked:** the budget-widget regression test failed when I removed the fix and passed with it, so it does guard that bug. Forced function calling returned exactly one valid tool call on a real model.
+- **What didn't, or isn't proven:** the six fixtures are hand-written, so the eval shows the agent and guardrails behave as designed on those inputs, not that Gemini would parse them identically. A live run of `gemini-3.8-flash` returned `503 UNAVAILABLE`, so live behavior depends on provider availability (the agent turns that into `llm_error` and keeps the last good plan). Fixture 6 shows the guardrail rejects "every 6 hours" but cannot show that the live model copies the phrase instead of converting it; that needs a live run.
+
+### Execution evidence
+
+[`docs/sample_trace.log`](docs/sample_trace.log) is the agent's own log for samples 1 and 2: one line per step (`request`, `parse_output`, `validation`, `plan`, `revision_proposal`, `revision_validation`, `revised_plan`, `stop`, `approval`). Regenerating it changes the run ids and the committed `task-...` ids, which are random; the steps and payloads are reproducible.
+
+## Design decisions and trade-offs
+
+- **The LLM never decides what gets scheduled.** It can only call four tools. The Scheduler decides placement, and `commit()` is the only code that writes to the owner.
+- **All or nothing validation.** One bad field asks a question and schedules nothing, so the schedule is never half-updated.
+- **No enum on frequency.** An enum would make the model turn "every 6 hours" into "daily", a guess the guardrails could never see. The model passes the user's words through and G6 checks them.
+- **Revisions are same-day only.** If a revision could change dates, moving a task to tomorrow would remove it from the planned day, and the conflict and deferred counts would drop while nothing got done. Same-day moves, a conflict-first improvement rule (R4), and a gate that never sends deferred-only plans to the LLM close that loophole.
+- **Plans run at 23:59 on the request's date,** because `Task.is_due` would otherwise silently drop "meds at 8am" when asked at 7am.
+- **Mock mode.** It makes the demo and tests deterministic and keyless. The cost is that it only understands the six recorded requests.
+- **One small fix to the base project:** a completed `"as needed"` task is no longer treated as always due (`Task.is_due`). `pawpal_system.py` still has exactly four classes.
+
+## Project layout
+
+```text
+pawpal_system.py   Base project: Task, Pet, Owner, Scheduler
+guardrails.py      Validation rules G1-G12 (pure, no LLM)
+llm_client.py      Tool schemas, GeminiClient, MockClient, get_client, --smoke
+agent.py           run_agent, revision loop, commit, discard, logging
+agent_demo.py      CLI demo         eval_agent.py   fixture eval
+app.py             Streamlit UI, including "Ask PawPal (AI)"
+fixtures/          Recorded mock responses + expected outcomes
+diagrams/          architecture.mmd (Mermaid source)
+docs/              sample_trace.log
+tests/             277 tests
+model_card.md      Limitations, misuse, AI collaboration, eval results
+```
+
+## Reflection
+This project taught me that AI is most useful when it has a small job and I stay in charge of the rest. It was great for explaining things I didn’t understand, fixing errors, and helping me build and write up PawPal+. But I learned I can’t just accept what it gives me. One diagram looked fine on the screen but was way too big to read, so I had to push back and ask for a simpler one. I also learned that passing tests don’t mean everything works. I had to double check these things myself and make sure that whatever I was asking for was clear enough for the AI to give me a good output.
+
+## Links
+
+- Architecture diagram: [`diagrams/architecture.mmd`](diagrams/architecture.mmd)
+- Model card: [`model_card.md`](model_card.md)
+- Sample trace: [`docs/sample_trace.log`](docs/sample_trace.log)
