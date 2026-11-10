@@ -132,7 +132,7 @@ Nothing is scheduled and nothing is committed. The LLM was told never to invent 
 
 ### Live model check
 
-`python llm_client.py --smoke` makes one real Gemini call (model `gemini-3.6-flash`) and verifies the response is exactly one valid tool call:
+`python llm_client.py --smoke` makes one real Gemini call and verifies the response is exactly one valid tool call. This output was captured on Nov 4 with `gemini-3.6-flash`:
 
 ```text
 model: gemini-3.6-flash
@@ -161,6 +161,8 @@ SMOKE OK
 ```
 
 The model left out the meds duration and the walk time instead of inventing them, which is what the guardrails rely on.
+
+Later live runs returned 503 UNAVAILABLE on gemini-3.6-flash and gemini-3.8-flash; gemini-3.5-flash-lite passed the same check on Nov 10. Live results depend on provider availability, which is why mock mode and a tested error path exist.
 
 ## Reliability and guardrail results
 
@@ -207,7 +209,7 @@ $ python -m pytest -q
 
 - Guardrails G1-G12, the revision rules, the commit/discard step, the CLI, the eval script, the Streamlit section (via Streamlit's `AppTest`), and the committed trace are all tested. No test uses the network.
 - **What worked:** the budget-widget regression test failed when I removed the fix and passed with it, so it does guard that bug. Forced function calling returned exactly one valid tool call on a real model.
-- **What didn't, or isn't proven:** the six fixtures are hand-written, so the eval shows the agent and guardrails behave as designed on those inputs, not that Gemini would parse them identically. A live run of `gemini-3.8-flash` returned `503 UNAVAILABLE`, so live behavior depends on provider availability (the agent turns that into `llm_error` and keeps the last good plan). Fixture 6 shows the guardrail rejects "every 6 hours" but cannot show that the live model copies the phrase instead of converting it; that needs a live run.
+- **What didn't, or isn't proven:** the six fixtures are hand-written, so the eval shows the agent and guardrails behave as designed on those inputs, not that Gemini would parse them identically. `gemini-3.8-flash` returned `503 UNAVAILABLE` twice on Nov 4, both `gemini-3.6-flash` and `gemini-3.8-flash` returned 503 on Nov 5 (including inside the Streamlit app), and `gemini-3.6-flash` returned 503 again on Nov 10, while `gemini-3.5-flash-lite` passed on Nov 10. Live behavior depends on provider availability (the agent turns a 503 into `llm_error` and keeps the last good plan). Fixture 6 shows the guardrail rejects "every 6 hours" but cannot show that the live model copies the phrase instead of converting it; that needs a live run.
 
 ### Execution evidence
 

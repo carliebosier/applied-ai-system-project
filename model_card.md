@@ -32,7 +32,7 @@ The AI has two small jobs. Everything else is regular code.
 4. **Revise.** Only if two of the new tasks overlap, the model may propose new start times on the same day. Four rules (R1 to R4) check the proposal, the scheduler re-plans, and the change is kept only if it reduces overlaps without deferring more tasks. This happens at most twice.
 5. **Approve.** The user picks the revised plan, the original plan, or discard. Only then does anything change.
 
-**Model used:** Google Gemini `gemini-3.6-flash`, temperature 0, forced tool calls. A mock mode replays recorded responses so the project runs without a key.
+**Model used:** Google Gemini, temperature 0, forced tool calls. The live check passed on `gemini-3.6-flash` on Nov 4 and on `gemini-3.5-flash-lite` on Nov 10. A mock mode replays recorded responses so the project runs without a key.
 
 **What the AI can and cannot decide:** It can read the request and suggest a time change. It cannot add or drop tasks, change durations or dates, change the time budget, or write to the owner. Those belong to the guardrails, the scheduler and the user.
 
@@ -70,7 +70,7 @@ For testing, I wrote 6 demo requests and the model's expected output for each, s
 - **Mock mode only knows six requests.**
 - **Duplicates are only checked at planning time.** If a task is added to the owner between planning and approving, approving does not re-check it.
 - **A request for tomorrow plans tomorrow's end of day,** so today's unfinished tasks may also show up as overdue.
-- **Live results depend on Google being up.** `gemini-3.8-flash` returned `503 UNAVAILABLE` on two tries, while `gemini-3.6-flash` worked.
+- **Live results depend on Google being up.** `gemini-3.8-flash` returned `503 UNAVAILABLE` on two tries on Nov 4. On Nov 5, both `gemini-3.6-flash` and `gemini-3.8-flash` returned 503. On Nov 10, `gemini-3.6-flash` returned 503 again, while `gemini-3.5-flash-lite` passed.
 
 ---
 
@@ -106,7 +106,7 @@ For testing, I wrote 6 demo requests and the model's expected output for each, s
 
 The "Calls" column is the number of times the AI was asked to revise a plan. Only fixture 2 needed it.
 
-**Live check:** `python llm_client.py --smoke` made one real Gemini call and got exactly one valid tool call back, with the missing meds duration and walk time correctly left out instead of invented.
+**Live check:** `python llm_client.py --smoke` made one real Gemini call and got exactly one valid tool call back, with the missing meds duration and walk time correctly left out instead of invented. It passed on `gemini-3.6-flash` on Nov 4 and on `gemini-3.5-flash-lite` on Nov 10.
 
 **Running it again:** I ran the demo, eval and tests on a second computer and got the same output.
 
@@ -114,7 +114,7 @@ The "Calls" column is the number of times the AI was asked to revise a plan. Onl
 
 ## 9. What Surprised Me
 
-**A working key and working code still weren't enough.** When I first ran the live check, it failed with a `503 UNAVAILABLE` error saying the model was getting too much demand. I ran it again and got the same error. My code was fine and so was my key. The model I picked, `gemini-3.8-flash`, was just overloaded. When I switched to `gemini-3.6-flash`, it worked right away and returned exactly the tool call I wanted. That surprised me because I assumed that if the code passed its tests, the live version would work too. It showed me why the project needs mock mode and an error path: if the AI call fails, the agent keeps the last good plan and I can still approve the original, so one bad API day doesn't break everything.
+**A working key and working code still weren't enough.** When I first ran the live check on Nov 4, it failed with a `503 UNAVAILABLE` error saying the model was getting too much demand. I ran it again and got the same error. My code was fine and so was my key. The model I picked, `gemini-3.8-flash`, was just overloaded. When I switched to `gemini-3.6-flash`, the smoke test passed. But that didn't last: on Nov 5 both `gemini-3.6-flash` and `gemini-3.8-flash` returned 503s, and on Nov 10 `gemini-3.6-flash` returned 503 again. A smaller model, `gemini-3.5-flash-lite`, passed on Nov 10. I also saw the 503 inside the app. It showed a plain error with a Dismiss button, and the trace showed the run stopped with nothing scheduled. That surprised me because I assumed that if the code passed its tests, the live version would work too. It showed me why the project needs mock mode and an error path: if the AI call fails, the agent keeps the last good plan and I can still approve the original, so one bad API day doesn't break everything.
 
 **Passing tests didn't prove the app worked.** Before the Streamlit section, all of my tests passed. But setting the time budget through the AI section had a hidden problem: the budget box on the page remembers its own value, so the next time I clicked any button, it quietly put the old number back over the new one. Normal tests wouldn't catch that, because it only happens on the click after approving. A test was added that approves a plan with a 30-minute budget and then clicks another button. When I took the fix out, that test failed (it showed 120 instead of 30), and with the fix it passed. That's how I knew the test was actually checking the bug and not just passing for show.
 

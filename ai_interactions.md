@@ -58,7 +58,7 @@ The second run in the file (a 30-minute budget with 45 minutes of tasks) shows t
 
 ### What did I have to verify or fix manually?
 
-- **The live model check failed at first.** `gemini-3.8-flash` returned `503 UNAVAILABLE` twice. Passing tests didn't tell me that. Switching to `gemini-3.6-flash` gave `SMOKE OK`.
+- **The live model check was unreliable.** `gemini-3.8-flash` returned `503 UNAVAILABLE` twice, then `gemini-3.6-flash` passed the smoke test once. Later, both returned 503s, including inside the Streamlit app, and a smaller model, `gemini-3.5-flash-lite`, passed on Nov 10. Passing tests didn't tell me any of this, and it's why the project has a mock mode and an error path.
 - **The first live run was skipped, not passed.** My `.env` had `PAWPAL_LLM_MODE=mock` and a blank API key, so the smoke test only printed SKIP. I fixed the file myself and ran it again.
 - **The architecture diagram.** The first version rendered but was far too big to read, and the second still was. I asked for simpler ones until the third was readable.
 - **A mock bug caught in review:** after a failed parse, `MockClient` kept the previous fixture active, so a later revise call could return a stale answer. The fix and a test went in as a follow-up.
